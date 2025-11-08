@@ -1,0 +1,29 @@
+{
+  "name": "funding-tracker-automation",
+  "version": "1.0.0",
+  "description": "Automated funding tracker that scrapes startup funding news daily from RSS feeds and stores data in Google Sheets",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node index.js"
+  },
+  "keywords": [
+    "funding",
+    "startup",
+    "scraper",
+    "rss",
+    "google-sheets",
+    "automation"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "rss-parser": "^3.13.0",
+    "googleapis": "^118.0.0",
+    "node-fetch": "^2.7.0",
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
