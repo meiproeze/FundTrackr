@@ -1,13 +1,19 @@
 const RssParser = require('rss-parser');
 const { google } = require('googleapis');
 const fetch = require('node-fetch');
-const fs = require('fs');
+const fs = require('fs').promises;
 const path = require('path');
 
-// Initialize Parser
+// Initialize Parser with custom fields
 const parser = new RssParser({
   requestOptions: {
     headers: { 'User-Agent': 'Mozilla/5.0' }
+  },
+  customFields: {
+    item: [
+      ['description', 'description'],
+      ['content:encoded', 'contentEncoded']
+    ]
   }
 });
 
@@ -15,27 +21,85 @@ const sheets = google.sheets('v4');
 
 // Configuration
 const FUNDING_KEYWORDS = [
-  'raised', 'funding', 'series', 'seed', 'investment', 'invested', 
-  'round', 'venture capital', 'vc funding', '$', 'million', 'million',
+  'raised', 'funding', 'series', 'seed', 'investment', 'invested',
+  'round', 'venture capital', 'vc funding', '$', 'million', 'crore',
   'backed', 'announces funding', 'secures funding', 'closes funding'
 ];
 
+// Source priority ranking (higher = more trusted)
+const SOURCE_PRIORITY = {
+  'techcrunch': 10,
+  'venturebeat': 9,
+  'crunchbase': 9,
+  'inc42': 8,
+  'vccircle': 8,
+  'economictimes': 7,
+  'yourstory': 7,
+  'default': 5
+};
+
+const HISTORY_FILE = 'funding_history.json';
+const HISTORY_RETENTION_DAYS = 30;
+
 class FundingScraper {
-  constructor(apiKey, spreadsheetId) {
+  constructor(apiKey, spreadsheetId, aiApiKey = null) {
     this.apiKey = apiKey;
     this.spreadsheetId = spreadsheetId;
+    this.aiApiKey = aiApiKey;
     this.auth = new google.auth.GoogleAuth({
       credentials: JSON.parse(apiKey),
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
   }
 
-  // Initialize Google Sheets API
   async initializeSheets() {
     this.auth = new google.auth.GoogleAuth({
       credentials: JSON.parse(this.apiKey),
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
+  }
+
+  // Load funding history from JSON file
+  async loadHistory() {
+    try {
+      const data = await fs.readFile(HISTORY_FILE, 'utf8');
+      return JSON.parse(data);
+    } catch (error) {
+      console.log('No history file found, starting fresh');
+      return { lastUpdated: new Date().toISOString(), data: [] };
+    }
+  }
+
+  // Save funding history to JSON file
+  async saveHistory(history) {
+    await fs.writeFile(HISTORY_FILE, JSON.stringify(history, null, 2));
+  }
+
+  // Clean old data (older than 30 days)
+  cleanOldData(historyData) {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - HISTORY_RETENTION_DAYS);
+    
+    return historyData.filter(item => {
+      const itemDate = new Date(item.funding_news_date);
+      return itemDate >= cutoffDate;
+    });
+  }
+
+  // Get source priority score
+  getSourcePriority(sourceUrl) {
+    const lowerUrl = sourceUrl.toLowerCase();
+    for (const [key, priority] of Object.entries(SOURCE_PRIORITY)) {
+      if (lowerUrl.includes(key)) {
+        return priority;
+      }
+    }
+    return SOURCE_PRIORITY.default;
+  }
+
+  // Create unique key for deduplication
+  createUniqueKey(companyName, round, date) {
+    return `${companyName.toLowerCase().trim()}_${round.toLowerCase().trim()}_${date}`.replace(/\s+/g, '_');
   }
 
   // Read RSS feed sources from Google Sheet
@@ -63,28 +127,8 @@ class FundingScraper {
         status: row[4] || 'active',
         lastChecked: row[5] || ''
       })).filter(source => source.url && source.status.toLowerCase() === 'active');
-
     } catch (error) {
       console.error('Error reading RSS sources:', error.message);
-      return [];
-    }
-  }
-
-  // Get existing companies to check for duplicates
-  async getExistingCompanies() {
-    try {
-      const authClient = await this.auth.getClient();
-      const response = await sheets.spreadsheets.values.get({
-        auth: authClient,
-        spreadsheetId: this.spreadsheetId,
-        range: 'Funding_Data!B:B', // Column B contains company names
-      });
-
-      const rows = response.data.values || [];
-      return rows.map(row => row[0] ? row[0].toLowerCase().trim() : '').filter(name => name);
-
-    } catch (error) {
-      console.error('Error reading existing companies:', error.message);
       return [];
     }
   }
@@ -109,7 +153,7 @@ class FundingScraper {
 
   // Extract company name from title
   extractCompanyName(title, content) {
-    // Try to find company name pattern (usually first meaningful word(s) before key phrases)
+    // Try to find company name pattern
     const patterns = [
       /^([A-Za-z0-9\s\-]+?)\s+(?:raises|secures|announces|closes|gets|bags)/i,
       /^([A-Za-z0-9\s\-]+?)\s+[Ss]eries\s+[A-Z]/i,
@@ -129,15 +173,20 @@ class FundingScraper {
   // Extract funding information using regex
   extractFundingInfo(text) {
     const fundingRegex = /\$\s?(\d+(?:\.\d{1,2})?)\s?(M|B|K)?/gi;
-    const roundRegex = /\b(?:seed|series\s+a|series\s+b|series\s+c|series\s+d|series\s+e|round|angel|pre-seed)\b/gi;
+    const croreRegex = /₹?\s?(\d+(?:\.\d{1,2})?)\s?crore/gi;
+    const roundRegex = /\b(?:seed|pre-seed|series\s+[a-z]|series\s+[a-z]\+|round|angel|bridge)\b/gi;
 
     const fundingMatches = [...text.matchAll(fundingRegex)];
+    const croreMatches = [...text.matchAll(croreRegex)];
     const roundMatches = [...text.matchAll(roundRegex)];
 
     let fundingAmount = 'Undisclosed';
     if (fundingMatches.length > 0) {
       const match = fundingMatches[fundingMatches.length - 1];
       fundingAmount = `$${match[1]}${match[2] || 'M'}`;
+    } else if (croreMatches.length > 0) {
+      const match = croreMatches[croreMatches.length - 1];
+      fundingAmount = `₹${match[1]} crore`;
     }
 
     let fundingRound = 'Unknown';
@@ -146,6 +195,28 @@ class FundingScraper {
     }
 
     return { fundingAmount, fundingRound };
+  }
+
+  // Extract investor names
+  extractInvestors(text) {
+    const investorPatterns = [
+      /(?:led by|from|investors included?|backed by|participation from)\s+([A-Z][A-Za-z0-9\s,&]+?)(?:\.|,|and|with)/gi,
+      /investors?\s+(?:include|are|like)\s+([A-Z][A-Za-z0-9\s,&]+?)(?:\.|,|and)/gi
+    ];
+
+    const investors = new Set();
+    for (const pattern of investorPatterns) {
+      const matches = [...text.matchAll(pattern)];
+      for (const match of matches) {
+        if (match[1]) {
+          // Split by comma and clean
+          const names = match[1].split(/,|\band\b/).map(n => n.trim()).filter(n => n.length > 2 && n.length < 50);
+          names.forEach(name => investors.add(name));
+        }
+      }
+    }
+
+    return Array.from(investors).slice(0, 5).join(', ') || 'Unknown';
   }
 
   // Generate LinkedIn URL from company name
@@ -167,6 +238,7 @@ class FundingScraper {
       'E-commerce': ['ecommerce', 'retail', 'shopping', 'marketplace', 'commerce'],
       'EdTech': ['education', 'edtech', 'learning', 'online course'],
       'ClimTech': ['climate', 'energy', 'sustainability', 'green'],
+      'Technology': ['tech', 'technology'],
       'Social': ['social', 'community', 'network'],
     };
 
@@ -194,12 +266,13 @@ class FundingScraper {
       const fullText = `${title} ${description}`;
       const companyName = this.extractCompanyName(title, fullText);
       const { fundingAmount, fundingRound } = this.extractFundingInfo(fullText);
+      const investors = this.extractInvestors(fullText);
       const industry = this.extractIndustry(fullText);
       const linkedinUrl = this.generateLinkedInUrl(companyName);
+      const sourcePriority = this.getSourcePriority(sourceLink);
 
       return {
-        date: pubDate,
-        companyName: companyName.trim(),
+        company: companyName.trim(),
         website: '',
         linkedinUrl: linkedinUrl,
         fundingAmount: fundingAmount,
@@ -207,22 +280,128 @@ class FundingScraper {
         industry: industry,
         description: description.substring(0, 200),
         sourceLink: sourceLink || article.link || '',
-        fundingNewsDate: pubDate
+        investorName: investors,
+        fundingNewsDate: pubDate,
+        lastUpdated: new Date().toISOString().split('T')[0],
+        sourcePriority: sourcePriority,
+        uniqueKey: this.createUniqueKey(companyName, fundingRound, pubDate)
       };
-
     } catch (error) {
       console.error('Error processing article:', error.message);
       return null;
     }
   }
 
-  // Check if company already exists (case-insensitive)
-  isDuplicate(companyName, existingCompanies) {
-    const lowerName = companyName.toLowerCase().trim();
-    return existingCompanies.some(existing => existing === lowerName);
+  // Deduplicate and merge data from history
+  async deduplicateWithHistory(newData, history) {
+    const historyMap = new Map();
+    history.data.forEach(item => {
+      historyMap.set(item.uniqueKey, item);
+    });
+
+    const toAdd = [];
+    const toUpdate = [];
+
+    for (const newItem of newData) {
+      const existing = historyMap.get(newItem.uniqueKey);
+      
+      if (!existing) {
+        // New entry
+        toAdd.push(newItem);
+        historyMap.set(newItem.uniqueKey, newItem);
+      } else {
+        // Entry exists - check if we should update
+        if (newItem.sourcePriority > existing.sourcePriority) {
+          // New source is more authoritative
+          const merged = { ...existing, ...newItem, lastUpdated: new Date().toISOString().split('T')[0] };
+          toUpdate.push(merged);
+          historyMap.set(newItem.uniqueKey, merged);
+        } else if (newItem.sourcePriority === existing.sourcePriority) {
+          // Same priority - merge missing fields
+          const merged = { ...existing };
+          Object.keys(newItem).forEach(key => {
+            if (!merged[key] || merged[key] === '' || merged[key] === 'Unknown' || merged[key] === 'Undisclosed') {
+              merged[key] = newItem[key];
+            }
+          });
+          merged.lastUpdated = new Date().toISOString().split('T')[0];
+          toUpdate.push(merged);
+          historyMap.set(newItem.uniqueKey, merged);
+        }
+      }
+    }
+
+    return { toAdd, toUpdate, updatedHistory: Array.from(historyMap.values()) };
   }
 
-  // Append data to Google Sheet
+  // Get existing data from Sheet
+  async getExistingSheetData() {
+    try {
+      const authClient = await this.auth.getClient();
+      const response = await sheets.spreadsheets.values.get({
+        auth: authClient,
+        spreadsheetId: this.spreadsheetId,
+        range: 'Funding_Data!A:K',
+      });
+
+      const rows = response.data.values || [];
+      if (rows.length <= 1) return [];
+
+      // Convert to objects with row index
+      return rows.slice(1).map((row, index) => ({
+        rowIndex: index + 2, // +2 because: 1 for header, 1 for 0-based index
+        company: row[0] || '',
+        website: row[1] || '',
+        linkedinUrl: row[2] || '',
+        fundingAmount: row[3] || '',
+        fundingRound: row[4] || '',
+        industry: row[5] || '',
+        description: row[6] || '',
+        sourceLink: row[7] || '',
+        investorName: row[8] || '',
+        fundingNewsDate: row[9] || '',
+        lastUpdated: row[10] || '',
+        uniqueKey: this.createUniqueKey(row[0] || '', row[4] || '', row[9] || '')
+      }));
+    } catch (error) {
+      console.error('Error reading existing sheet data:', error.message);
+      return [];
+    }
+  }
+
+  // Update existing row in Sheet
+  async updateSheetRow(rowIndex, data) {
+    try {
+      const authClient = await this.auth.getClient();
+      const values = [[
+        data.company,
+        data.website,
+        data.linkedinUrl,
+        data.fundingAmount,
+        data.fundingRound,
+        data.industry,
+        data.description,
+        data.sourceLink,
+        data.investorName,
+        data.fundingNewsDate,
+        data.lastUpdated
+      ]];
+
+      await sheets.spreadsheets.values.update({
+        auth: authClient,
+        spreadsheetId: this.spreadsheetId,
+        range: `Funding_Data!A${rowIndex}:K${rowIndex}`,
+        valueInputOption: 'RAW',
+        resource: { values }
+      });
+
+      console.log(`Updated row ${rowIndex} for ${data.company}`);
+    } catch (error) {
+      console.error(`Error updating row ${rowIndex}:`, error.message);
+    }
+  }
+
+  // Append new rows to Sheet
   async appendToSheet(fundingData) {
     if (fundingData.length === 0) {
       console.log('No new funding data to append');
@@ -232,8 +411,7 @@ class FundingScraper {
     try {
       const authClient = await this.auth.getClient();
       const values = fundingData.map(item => [
-        item.date,
-        item.companyName,
+        item.company,
         item.website,
         item.linkedinUrl,
         item.fundingAmount,
@@ -241,33 +419,33 @@ class FundingScraper {
         item.industry,
         item.description,
         item.sourceLink,
-        item.fundingNewsDate
+        item.investorName,
+        item.fundingNewsDate,
+        item.lastUpdated
       ]);
 
       const response = await sheets.spreadsheets.values.append({
         auth: authClient,
         spreadsheetId: this.spreadsheetId,
-        range: 'Funding_Data!A:J',
+        range: 'Funding_Data!A:K',
         valueInputOption: 'RAW',
         resource: { values }
       });
 
       console.log(`Successfully appended ${response.data.updates.updatedRows} rows to Google Sheet`);
       return response;
-
     } catch (error) {
       console.error('Error appending to sheet:', error.message);
       throw error;
     }
   }
 
-  // Update last checked timestamp for source
+  // Update source timestamp
   async updateSourceTimestamp(sourceId) {
     try {
       const authClient = await this.auth.getClient();
       const now = new Date().toISOString();
 
-      // Get all sources to find the row index
       const response = await sheets.spreadsheets.values.get({
         auth: authClient,
         spreadsheetId: this.spreadsheetId,
@@ -286,7 +464,6 @@ class FundingScraper {
           resource: { values: [[now]] }
         });
       }
-
     } catch (error) {
       console.error('Error updating timestamp:', error.message);
     }
@@ -296,57 +473,96 @@ class FundingScraper {
   async run() {
     try {
       console.log('Starting funding tracker scraper...');
-      
+      console.log('Phase 1: Loading history and sources');
+
+      // Load history
+      let history = await this.loadHistory();
+      console.log(`Loaded ${history.data.length} historical records`);
+
+      // Clean old data
+      history.data = this.cleanOldData(history.data);
+      console.log(`After cleanup: ${history.data.length} records (last 30 days)`);
+
+      // Get sources
       const sources = await this.getRSSFeedSources();
-      console.log(`Found ${sources.length} RSS sources`);
+      console.log(`Found ${sources.length} active RSS sources`);
 
       if (sources.length === 0) {
         console.log('No active RSS sources found. Exiting.');
         return;
       }
 
-      const existingCompanies = await this.getExistingCompanies();
-      console.log(`Found ${existingCompanies.length} existing companies`);
-
-      const allFundingData = [];
+      console.log('\nPhase 2: Scraping and processing articles');
+      const allNewData = [];
 
       for (const source of sources) {
         console.log(`\nProcessing source: ${source.name}`);
-        
         try {
           const articles = await this.parseFeed(source.url);
           console.log(`Found ${articles.length} articles in ${source.name}`);
 
           for (const article of articles) {
             const fundingData = await this.processFundingArticle(article, article.link);
-
-            if (fundingData && !this.isDuplicate(fundingData.companyName, existingCompanies)) {
-              allFundingData.push(fundingData);
-              existingCompanies.push(fundingData.companyName.toLowerCase().trim());
+            if (fundingData) {
+              allNewData.push(fundingData);
             }
           }
 
-          // Update last checked timestamp
+          // Update timestamp
           await this.updateSourceTimestamp(source.id);
 
-          // Rate limiting: 1 second delay between sources
+          // Rate limiting
           await new Promise(resolve => setTimeout(resolve, 1000));
-
         } catch (error) {
           console.error(`Error processing source ${source.name}:`, error.message);
-          continue; // Continue with next source
+          continue;
         }
       }
 
-      // Append all new funding data to sheet
-      if (allFundingData.length > 0) {
-        console.log(`\nAppending ${allFundingData.length} new funding entries...`);
-        await this.appendToSheet(allFundingData);
+      console.log(`\nExtracted ${allNewData.length} potential funding entries`);
+
+      console.log('\nPhase 3: Deduplication and merging');
+      const { toAdd, toUpdate, updatedHistory } = await this.deduplicateWithHistory(allNewData, history);
+      
+      console.log(`New entries to add: ${toAdd.length}`);
+      console.log(`Existing entries to update: ${toUpdate.length}`);
+
+      console.log('\nPhase 4: Syncing with Google Sheet');
+      
+      // Get existing sheet data
+      const sheetData = await this.getExistingSheetData();
+      const sheetMap = new Map();
+      sheetData.forEach(row => {
+        sheetMap.set(row.uniqueKey, row);
+      });
+
+      // Update existing rows
+      for (const item of toUpdate) {
+        const sheetRow = sheetMap.get(item.uniqueKey);
+        if (sheetRow) {
+          await this.updateSheetRow(sheetRow.rowIndex, item);
+        }
       }
 
-      console.log('Scraping completed successfully!');
-      return { success: true, entriesAdded: allFundingData.length };
+      // Add new rows
+      if (toAdd.length > 0) {
+        await this.appendToSheet(toAdd);
+      }
 
+      // Save updated history
+      history.data = updatedHistory;
+      history.lastUpdated = new Date().toISOString();
+      await this.saveHistory(history);
+      console.log('History file updated');
+
+      console.log('\n✅ Scraping completed successfully!');
+      console.log(`Summary: ${toAdd.length} new entries added, ${toUpdate.length} entries updated`);
+      
+      return {
+        success: true,
+        entriesAdded: toAdd.length,
+        entriesUpdated: toUpdate.length
+      };
     } catch (error) {
       console.error('Fatal error in scraper:', error.message);
       throw error;
