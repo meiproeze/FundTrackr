@@ -346,7 +346,6 @@ main().catch(console.error);
   'https://www.crunchbase.com/feed',
   'https://yourstory.com/feed',
   // Add more RSS feeds here
-];
 
 const SOURCE_PRIORITY = {
   'techcrunch.com': 1,
