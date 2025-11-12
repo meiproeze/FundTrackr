@@ -8,9 +8,7 @@
   },
   "dependencies": {
     "axios": "^1.6.0",
-    "cheerio": "^1.0.0-rc.12",
-    "rss-parser": "^3.13.0",
-    "googleapis": "^128.0.0",
-    "date-fns": "^2.30.0"
+    "@google/generative-ai": "^0.1.3",
+    "googleapis": "^120.0.0"
   }
 }
