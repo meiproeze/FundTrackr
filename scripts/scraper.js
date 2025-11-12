@@ -1,3 +1,4 @@
+const path = require('path');
 const axios = require('axios');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { google } = require('googleapis');
@@ -139,7 +140,7 @@ function parseAIResponse(text, article) {
 // Load history (30 days)
 async function loadHistory() {
   try {
-    const data = await fs.readFile('history.json', 'utf8');
+    const data = await fs.readFile(path.join(__dirname, 'history.json'), 'utf8');
     return JSON.parse(data);
   } catch (error) {
     return { entries: [] };
@@ -232,11 +233,14 @@ function mergeEntries(existing, newEntry) {
 
 // Update Google Sheets
 async function updateGoogleSheets(entries) {
-  const credentials = JSON.parse(process.env.GOOGLE_SHEETS_CREDENTIALS);
-  const auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-  });
+  try {
+    const credentials = JSON.parse(process.env.GOOGLE_SHEETS_CREDENTIALS);
+    // ... rest of code
+  } catch (error) {
+    console.error('Failed to parse Google credentials:', error.message);
+    throw new Error('Google Sheets credentials are invalid or missing');
+  }
+}
   
   const sheets = google.sheets({ version: 'v4', auth });
   const spreadsheetId = process.env.SPREADSHEET_ID;
