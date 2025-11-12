@@ -143,13 +143,14 @@ async function loadHistory() {
     const data = await fs.readFile(path.join(__dirname, 'history.json'), 'utf8');
     return JSON.parse(data);
   } catch (error) {
+    console.log('History file not found, starting fresh');
     return { entries: [] };
   }
 }
 
 // Save history
 async function saveHistory(history) {
-  await fs.writeFile('history.json', JSON.stringify(history, null, 2));
+  await fs.writeFile(path.join(__dirname, 'history.json'), JSON.stringify(history, null, 2));
 }
 
 // Clean old entries (30 days)
@@ -235,62 +236,64 @@ function mergeEntries(existing, newEntry) {
 async function updateGoogleSheets(entries) {
   try {
     const credentials = JSON.parse(process.env.GOOGLE_SHEETS_CREDENTIALS);
-    // ... rest of code
-  } catch (error) {
-    console.error('Failed to parse Google credentials:', error.message);
-    throw new Error('Google Sheets credentials are invalid or missing');
-  }
-}
-  
-  const sheets = google.sheets({ version: 'v4', auth });
-  const spreadsheetId = process.env.SPREADSHEET_ID;
-  
-  const response = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: 'Funding_Data!A:K',
-  });
-  
-  const existingRows = response.data.values || [];
-  
-  for (const entry of entries) {
-    const existingIndex = existingRows.findIndex((row, idx) =>
-      idx > 0 &&
-      row[0] === entry.company &&
-      row[4] === entry.funding_round &&
-      row[9] === entry.funding_news_date
-    );
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
     
-    const rowData = [
-      entry.company,
-      entry.website,
-      '', // LinkedIn
-      entry.amount,
-      entry.funding_round,
-      entry.industry,
-      entry.description,
-      entry.source,
-      entry.investor_name,
-      entry.funding_news_date,
-      entry.last_updated,
-    ];
+    const sheets = google.sheets({ version: 'v4', auth });
+    const spreadsheetId = process.env.SPREADSHEET_ID;
     
-    if (existingIndex >= 0) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `Funding_Data!A${existingIndex + 1}:K${existingIndex + 1}`,
-        valueInputOption: 'RAW',
-        resource: { values: [rowData] },
-      });
-      console.log(`Updated: ${entry.company}`);
-    } else {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId,
-        range: 'Funding_Data!A:K',
-        valueInputOption: 'RAW',
-        resource: { values: [rowData] },
-      });
-      console.log(`Added: ${entry.company}`);
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: 'Funding_Data!A:K',
+    });
+    
+    const existingRows = response.data.values || [];
+    
+    for (const entry of entries) {
+      const existingIndex = existingRows.findIndex((row, idx) =>
+        idx > 0 &&
+        row[0] === entry.company &&
+        row[4] === entry.funding_round &&
+        row[9] === entry.funding_news_date
+      );
+      
+      const rowData = [
+        entry.company,
+        entry.website,
+        '', // LinkedIn
+        entry.amount,
+        entry.funding_round,
+        entry.industry,
+        entry.description,
+        entry.source,
+        entry.investor_name,
+        entry.funding_news_date,
+        entry.last_updated,
+      ];
+      
+      if (existingIndex >= 0) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId,
+          range: `Funding_Data!A${existingIndex + 1}:K${existingIndex + 1}`,
+          valueInputOption: 'RAW',
+          resource: { values: [rowData] },
+        });
+        console.log(`Updated: ${entry.company}`);
+      } else {
+        await sheets.spreadsheets.values.append({
+          spreadsheetId,
+          range: 'Funding_Data!A:K',
+          valueInputOption: 'RAW',
+          resource: { values: [rowData] },
+        });
+        console.log(`Added: ${entry.company}`);
+      }
     }
+  } catch (error) {
+    console.error('Error updating Google Sheets:', error.message);
+    throw error;
   }
 }
 
