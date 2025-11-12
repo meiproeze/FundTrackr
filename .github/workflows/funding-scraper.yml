@@ -49,3 +49,4 @@ jobs:
           path: |
             history.json
           retention-days: 7
+
