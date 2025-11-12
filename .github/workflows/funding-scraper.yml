@@ -15,26 +15,24 @@ jobs:
         uses: actions/checkout@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
+          
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
-
+          
       - name: Install dependencies
         run: npm install
-
+        
       - name: Run scraper
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: node scraper.js
-
-      - name: Sync to Google Sheets
-        env:
-          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
-        run: node sheets-sync.js
-
+          BYTEZ_API_KEY: ${{ secrets.BYTEZ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        run: node scripts/scraper.js
+        
       - name: Commit and push history
         run: |
           git config --global user.name "FundTrackr Bot"
@@ -42,13 +40,12 @@ jobs:
           git add history.json
           git diff --quiet && git diff --staged --quiet || git commit -m "Update funding history - $(date +'%Y-%m-%d')"
           git push
-
+          
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: scraper-logs
           path: |
             history.json
-            sync-data.json
           retention-days: 7
