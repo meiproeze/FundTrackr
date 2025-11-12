@@ -3,15 +3,6 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { google } = require('googleapis');
 const fs = require('fs').promises;
 
-// Configuration
-const RSS_FEEDS = [// FundTrackr Improved Scraper with Multi-API Fallback
-// Features: 30-day retention, Bytez/OpenRouter/Gemini APIs, Investor extraction
-
-const axios = require('axios');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { google } = require('googleapis');
-const fs = require('fs').promises;
-
 // RSS Feed Sources
 const RSS_FEEDS = [
   'https://techcrunch.com/tag/funding/feed/',
