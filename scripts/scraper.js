@@ -25,7 +25,8 @@ const SOURCE_PRIORITY = {
 let genAI, geminiModel;
 if (process.env.GEMINI_API_KEY) {
   genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  geminiModel = genAI.getGenerativeModel({ model: 'gemini-pro' });
+  // FIXED: Use gemini-1.5-flash instead of deprecated gemini-pro
+  geminiModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 }
 
 // Multi-API Extraction with Fallback
@@ -50,73 +51,91 @@ Extract:
 Return ONLY valid JSON, no other text.
 `;
 
-  // Try Bytez API first (FIXED VERSION)
+  // Try Bytez API first - COMPLETELY FIXED
   if (process.env.BYTEZ_API_KEY) {
     try {
       console.log('Trying Bytez API...');
       
-      // FIXED: Bytez uses their own endpoint format
-      const response = await axios.post('https://api.bytez.com/v1/run', {
-        model: 'meta-llama/llama-3.1-8b-instruct', // Free model
-        input: prompt,
-        stream: false
+      // FIXED: Bytez uses LiteLLM-compatible endpoint
+      const response = await axios.post('https://api.bytez.com/v1/chat/completions', {
+        model: 'bytez/meta-llama/Llama-3.2-3B-Instruct', // FREE model
+        messages: [
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 500
       }, {
         headers: {
-          'Authorization': process.env.BYTEZ_API_KEY, // No "Bearer" prefix
+          'Authorization': `Bearer ${process.env.BYTEZ_API_KEY}`,
           'Content-Type': 'application/json'
         },
         timeout: 30000
       });
       
-      // Bytez response format
-      const text = response.data.output || response.data.result;
+      // Parse response
+      const text = response.data.choices[0].message.content;
+      const result = parseAIResponse(text, article);
       
-      if (text) {
-        return parseAIResponse(text, article);
+      if (result) {
+        console.log('✅ Bytez API succeeded');
+        return result;
       }
     } catch (error) {
-      console.error('Bytez API failed:', error.response?.data || error.message);
+      console.error('Bytez API failed:', error.response?.data?.error || error.message);
     }
   }
 
-  // Try OpenRouter API
+  // Try OpenRouter API - FIXED MODEL NAME
   if (process.env.OPENROUTER_API_KEY) {
     try {
       console.log('Trying OpenRouter API...');
       const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-        model: 'meta-llama/llama-3.1-8b-instruct:free',
+        model: 'meta-llama/llama-3.2-3b-instruct:free', // FIXED: Correct free model
         messages: [{ role: 'user', content: prompt }]
       }, {
         headers: {
           'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://github.com/your-username/funding-tracker', // Required by OpenRouter
-          'X-Title': 'Funding Tracker' // Optional but recommended
+          'HTTP-Referer': 'https://github.com/fundtracker',
+          'X-Title': 'Funding Tracker'
         },
         timeout: 30000
       });
       
       const text = response.data.choices[0].message.content;
-      return parseAIResponse(text, article);
+      const result = parseAIResponse(text, article);
+      
+      if (result) {
+        console.log('✅ OpenRouter API succeeded');
+        return result;
+      }
     } catch (error) {
-      console.error('OpenRouter API failed:', error.response?.data || error.message);
+      console.error('OpenRouter API failed:', error.response?.data?.error || error.message);
     }
   }
 
-  // Fallback to Gemini
+  // Fallback to Gemini - FIXED MODEL NAME
   if (geminiModel) {
     try {
       console.log('Trying Gemini API...');
       const result = await geminiModel.generateContent(prompt);
       const response = await result.response;
       const text = response.text();
-      return parseAIResponse(text, article);
+      const parsed = parseAIResponse(text, article);
+      
+      if (parsed) {
+        console.log('✅ Gemini API succeeded');
+        return parsed;
+      }
     } catch (error) {
       console.error('Gemini API failed:', error.message);
     }
   }
 
-  console.error('All AI APIs failed');
+  console.error('❌ All AI APIs failed');
   return null;
 }
 
@@ -131,6 +150,11 @@ function parseAIResponse(text, article) {
     
     if (jsonMatch) {
       const extracted = JSON.parse(jsonMatch[0]);
+      
+      // Validate that we got something useful
+      if (!extracted.company_name || extracted.company_name === 'Unknown' || extracted.company_name.length < 2) {
+        return null;
+      }
       
       return {
         company: extracted.company_name || 'Unknown',
@@ -147,7 +171,6 @@ function parseAIResponse(text, article) {
     }
   } catch (error) {
     console.error('JSON parse error:', error.message);
-    console.error('Raw text:', text.substring(0, 200));
   }
   return null;
 }
@@ -165,10 +188,7 @@ async function loadHistory() {
 
 // Save history
 async function saveHistory(history) {
-  await fs.writeFile(
-    path.join(__dirname, 'history.json'), 
-    JSON.stringify(history, null, 2)
-  );
+  await fs.writeFile(path.join(__dirname, 'history.json'), JSON.stringify(history, null, 2));
 }
 
 // Clean old entries (30 days)
@@ -282,6 +302,11 @@ function mergeEntries(existing, newEntry) {
 
 // Update Google Sheets
 async function updateGoogleSheets(entries) {
+  if (!process.env.SPREADSHEET_ID) {
+    console.log('⚠️ SPREADSHEET_ID not set, skipping Google Sheets update');
+    return;
+  }
+  
   try {
     console.log('Connecting to Google Sheets...');
     
@@ -383,11 +408,15 @@ async function main() {
     console.log(`💰 Found ${fundingArticles.length} funding articles`);
     
     const newEntries = [];
+    let successCount = 0;
+    let failCount = 0;
     
-    // Process each funding article
-    for (let i = 0; i < fundingArticles.length; i++) {
-      const article = fundingArticles[i];
-      console.log(`\n[${i + 1}/${fundingArticles.length}] Processing: ${article.title.substring(0, 60)}...`);
+    // Process each funding article (limit to first 10 to stay within API limits)
+    const articlesToProcess = fundingArticles.slice(0, 10);
+    
+    for (let i = 0; i < articlesToProcess.length; i++) {
+      const article = articlesToProcess[i];
+      console.log(`\n[${i + 1}/${articlesToProcess.length}] Processing: ${article.title.substring(0, 60)}...`);
       
       const extracted = await extractWithAI(article);
       
@@ -411,9 +440,11 @@ async function main() {
         } else {
           history.entries.push(extracted);
           newEntries.push(extracted);
+          successCount++;
           console.log(`✅ Extracted: ${extracted.company} - ${extracted.amount}`);
         }
       } else {
+        failCount++;
         console.log(`⚠️  Failed to extract data from article`);
       }
       
@@ -424,7 +455,10 @@ async function main() {
     console.log(`\n📊 Summary:`);
     console.log(`   - Total articles: ${articles.length}`);
     console.log(`   - Funding articles: ${fundingArticles.length}`);
-    console.log(`   - New entries: ${newEntries.length}`);
+    console.log(`   - Processed: ${articlesToProcess.length}`);
+    console.log(`   - Successful extractions: ${successCount}`);
+    console.log(`   - Failed extractions: ${failCount}`);
+    console.log(`   - New unique entries: ${newEntries.length}`);
     console.log(`   - Total in history: ${history.entries.length}`);
     
     // Update Google Sheets
