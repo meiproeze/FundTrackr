@@ -50,25 +50,32 @@ Extract:
 Return ONLY valid JSON, no other text.
 `;
 
-  // Try Bytez API first
+  // Try Bytez API first (FIXED VERSION)
   if (process.env.BYTEZ_API_KEY) {
     try {
       console.log('Trying Bytez API...');
-      const response = await axios.post('https://api.bytez.com/v1/chat/completions', {
-        model: 'gpt-4-turbo',
-        messages: [{ role: 'user', content: prompt }]
+      
+      // FIXED: Bytez uses their own endpoint format
+      const response = await axios.post('https://api.bytez.com/v1/run', {
+        model: 'meta-llama/llama-3.1-8b-instruct', // Free model
+        input: prompt,
+        stream: false
       }, {
         headers: {
-          'Authorization': `Bearer ${process.env.BYTEZ_API_KEY}`,
+          'Authorization': process.env.BYTEZ_API_KEY, // No "Bearer" prefix
           'Content-Type': 'application/json'
         },
         timeout: 30000
       });
       
-      const text = response.data.choices[0].message.content;
-      return parseAIResponse(text, article);
+      // Bytez response format
+      const text = response.data.output || response.data.result;
+      
+      if (text) {
+        return parseAIResponse(text, article);
+      }
     } catch (error) {
-      console.error('Bytez API failed:', error.message);
+      console.error('Bytez API failed:', error.response?.data || error.message);
     }
   }
 
@@ -82,7 +89,9 @@ Return ONLY valid JSON, no other text.
       }, {
         headers: {
           'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://github.com/your-username/funding-tracker', // Required by OpenRouter
+          'X-Title': 'Funding Tracker' // Optional but recommended
         },
         timeout: 30000
       });
@@ -90,7 +99,7 @@ Return ONLY valid JSON, no other text.
       const text = response.data.choices[0].message.content;
       return parseAIResponse(text, article);
     } catch (error) {
-      console.error('OpenRouter API failed:', error.message);
+      console.error('OpenRouter API failed:', error.response?.data || error.message);
     }
   }
 
@@ -114,7 +123,12 @@ Return ONLY valid JSON, no other text.
 // Parse AI response
 function parseAIResponse(text, article) {
   try {
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    // Remove markdown code blocks if present
+    let cleanText = text.replace(/```json\n?|\n?```/g, '').trim();
+    
+    // Try to find JSON in the response
+    const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+    
     if (jsonMatch) {
       const extracted = JSON.parse(jsonMatch[0]);
       
@@ -133,6 +147,7 @@ function parseAIResponse(text, article) {
     }
   } catch (error) {
     console.error('JSON parse error:', error.message);
+    console.error('Raw text:', text.substring(0, 200));
   }
   return null;
 }
@@ -150,7 +165,10 @@ async function loadHistory() {
 
 // Save history
 async function saveHistory(history) {
-  await fs.writeFile(path.join(__dirname, 'history.json'), JSON.stringify(history, null, 2));
+  await fs.writeFile(
+    path.join(__dirname, 'history.json'), 
+    JSON.stringify(history, null, 2)
+  );
 }
 
 // Clean old entries (30 days)
@@ -170,8 +188,15 @@ async function fetchRSSFeeds() {
   
   for (const feed of RSS_FEEDS) {
     try {
-      const response = await axios.get(feed, { timeout: 15000 });
+      console.log(`Fetching: ${feed}`);
+      const response = await axios.get(feed, { 
+        timeout: 15000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; FundingTracker/1.0)'
+        }
+      });
       const articles = parseRSS(response.data, feed);
+      console.log(`Found ${articles.length} articles from ${feed}`);
       allArticles.push(...articles);
     } catch (error) {
       console.error(`Error fetching ${feed}:`, error.message);
@@ -181,7 +206,7 @@ async function fetchRSSFeeds() {
   return allArticles;
 }
 
-// Parse RSS
+// Parse RSS (improved)
 function parseRSS(xml, feedUrl) {
   const articles = [];
   const itemRegex = /<item>(.*?)<\/item>/gs;
@@ -189,18 +214,41 @@ function parseRSS(xml, feedUrl) {
   
   for (const match of matches) {
     const item = match[1];
-    const title = item.match(/<title>(<!\[CDATA\[)?(.*?)(]]>)?<\/title>/)?.[2] || '';
-    const link = item.match(/<link>(.*?)<\/link>/)?.[1] || '';
-    const description = item.match(/<description>(<!\[CDATA\[)?(.*?)(]]>)?<\/description>/)?.[2] || '';
-    const pubDate = item.match(/<pubDate>(.*?)<\/pubDate>/)?.[1] || '';
     
-    articles.push({
-      title,
-      link,
-      description: description.replace(/<[^>]*>/g, ''),
-      pubDate: new Date(pubDate).toISOString().split('T')[0],
-      source: new URL(feedUrl).hostname,
-    });
+    // Extract title
+    const titleMatch = item.match(/<title>(<!\[CDATA\[)?(.*?)(]]>)?<\/title>/s);
+    const title = titleMatch ? titleMatch[2].trim() : '';
+    
+    // Extract link
+    const linkMatch = item.match(/<link>(.*?)<\/link>/);
+    const link = linkMatch ? linkMatch[1].trim() : '';
+    
+    // Extract description
+    const descMatch = item.match(/<description>(<!\[CDATA\[)?(.*?)(]]>)?<\/description>/s);
+    let description = descMatch ? descMatch[2] : '';
+    description = description.replace(/<[^>]*>/g, '').trim(); // Remove HTML tags
+    
+    // Extract pubDate
+    const pubDateMatch = item.match(/<pubDate>(.*?)<\/pubDate>/);
+    let pubDate = new Date().toISOString().split('T')[0]; // Default to today
+    if (pubDateMatch) {
+      try {
+        pubDate = new Date(pubDateMatch[1]).toISOString().split('T')[0];
+      } catch (e) {
+        console.error('Date parse error:', e.message);
+      }
+    }
+    
+    // Only add if we have minimum required fields
+    if (title && link) {
+      articles.push({
+        title,
+        link,
+        description,
+        pubDate,
+        source: new URL(feedUrl).hostname,
+      });
+    }
   }
   
   return articles;
@@ -235,6 +283,8 @@ function mergeEntries(existing, newEntry) {
 // Update Google Sheets
 async function updateGoogleSheets(entries) {
   try {
+    console.log('Connecting to Google Sheets...');
+    
     const credentials = JSON.parse(process.env.GOOGLE_SHEETS_CREDENTIALS);
     const auth = new google.auth.GoogleAuth({
       credentials,
@@ -244,6 +294,7 @@ async function updateGoogleSheets(entries) {
     const sheets = google.sheets({ version: 'v4', auth });
     const spreadsheetId = process.env.SPREADSHEET_ID;
     
+    console.log('Reading existing data...');
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: 'Funding_Data!A:K',
@@ -262,7 +313,7 @@ async function updateGoogleSheets(entries) {
       const rowData = [
         entry.company,
         entry.website,
-        '', // LinkedIn
+        '', // LinkedIn (will add later)
         entry.amount,
         entry.funding_round,
         entry.industry,
@@ -274,78 +325,129 @@ async function updateGoogleSheets(entries) {
       ];
       
       if (existingIndex >= 0) {
+        // Update existing row
         await sheets.spreadsheets.values.update({
           spreadsheetId,
           range: `Funding_Data!A${existingIndex + 1}:K${existingIndex + 1}`,
           valueInputOption: 'RAW',
           resource: { values: [rowData] },
         });
-        console.log(`Updated: ${entry.company}`);
+        console.log(`✅ Updated: ${entry.company}`);
       } else {
+        // Append new row
         await sheets.spreadsheets.values.append({
           spreadsheetId,
           range: 'Funding_Data!A:K',
           valueInputOption: 'RAW',
           resource: { values: [rowData] },
         });
-        console.log(`Added: ${entry.company}`);
+        console.log(`✅ Added: ${entry.company}`);
       }
+      
+      // Rate limiting for Google Sheets API
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
   } catch (error) {
     console.error('Error updating Google Sheets:', error.message);
+    if (error.response?.data) {
+      console.error('Details:', JSON.stringify(error.response.data, null, 2));
+    }
     throw error;
   }
 }
 
 // Main
 async function main() {
-  console.log('Starting scraper...');
+  console.log('🚀 Starting Funding Tracker Scraper...');
+  console.log(`📅 Date: ${new Date().toISOString()}`);
   
-  let history = await loadHistory();
-  console.log(`Loaded ${history.entries.length} entries`);
-  
-  history.entries = cleanOldEntries(history.entries);
-  console.log(`After cleanup: ${history.entries.length} entries`);
-  
-  const articles = await fetchRSSFeeds();
-  console.log(`Fetched ${articles.length} articles`);
-  
-  const newEntries = [];
-  
-  for (const article of articles) {
-    const extracted = await extractWithAI(article);
+  try {
+    // Load history
+    let history = await loadHistory();
+    console.log(`📊 Loaded ${history.entries.length} historical entries`);
     
-    if (extracted && extracted.company !== 'Unknown') {
-      if (isDuplicate(extracted, history)) {
-        const existingIndex = history.entries.findIndex(e =>
-          e.company.toLowerCase() === extracted.company.toLowerCase() &&
-          e.funding_round === extracted.funding_round &&
-          e.funding_news_date === extracted.funding_news_date
-        );
-        
-        if (existingIndex >= 0) {
-          history.entries[existingIndex] = mergeEntries(
-            history.entries[existingIndex],
-            extracted
+    // Clean old entries
+    history.entries = cleanOldEntries(history.entries);
+    console.log(`🧹 After cleanup: ${history.entries.length} entries`);
+    
+    // Fetch RSS feeds
+    const articles = await fetchRSSFeeds();
+    console.log(`📰 Fetched ${articles.length} total articles`);
+    
+    // Filter for funding articles
+    const fundingKeywords = ['raised', 'funding', 'series', 'seed', 'investment', 'round', 'capital'];
+    const fundingArticles = articles.filter(article => {
+      const text = (article.title + ' ' + article.description).toLowerCase();
+      return fundingKeywords.some(keyword => text.includes(keyword));
+    });
+    console.log(`💰 Found ${fundingArticles.length} funding articles`);
+    
+    const newEntries = [];
+    
+    // Process each funding article
+    for (let i = 0; i < fundingArticles.length; i++) {
+      const article = fundingArticles[i];
+      console.log(`\n[${i + 1}/${fundingArticles.length}] Processing: ${article.title.substring(0, 60)}...`);
+      
+      const extracted = await extractWithAI(article);
+      
+      if (extracted && extracted.company !== 'Unknown') {
+        if (isDuplicate(extracted, history)) {
+          console.log(`⏭️  Skipped (duplicate): ${extracted.company}`);
+          
+          // Merge with existing if better source
+          const existingIndex = history.entries.findIndex(e =>
+            e.company.toLowerCase() === extracted.company.toLowerCase() &&
+            e.funding_round === extracted.funding_round &&
+            e.funding_news_date === extracted.funding_news_date
           );
+          
+          if (existingIndex >= 0) {
+            history.entries[existingIndex] = mergeEntries(
+              history.entries[existingIndex],
+              extracted
+            );
+          }
+        } else {
+          history.entries.push(extracted);
+          newEntries.push(extracted);
+          console.log(`✅ Extracted: ${extracted.company} - ${extracted.amount}`);
         }
       } else {
-        history.entries.push(extracted);
-        newEntries.push(extracted);
+        console.log(`⚠️  Failed to extract data from article`);
       }
+      
+      // Rate limiting between API calls
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    console.log(`\n📊 Summary:`);
+    console.log(`   - Total articles: ${articles.length}`);
+    console.log(`   - Funding articles: ${fundingArticles.length}`);
+    console.log(`   - New entries: ${newEntries.length}`);
+    console.log(`   - Total in history: ${history.entries.length}`);
+    
+    // Update Google Sheets
+    if (newEntries.length > 0) {
+      console.log(`\n📤 Updating Google Sheets...`);
+      await updateGoogleSheets(newEntries);
+      console.log(`✅ Google Sheets updated!`);
+    } else {
+      console.log(`\n⚠️  No new entries to add to Google Sheets`);
+    }
+    
+    // Save history
+    await saveHistory(history);
+    console.log(`💾 History saved`);
+    
+    console.log(`\n🎉 Scraper finished successfully!`);
+    
+  } catch (error) {
+    console.error('\n❌ FATAL ERROR:', error);
+    console.error('Stack trace:', error.stack);
+    process.exit(1);
   }
-  
-  console.log(`Found ${newEntries.length} new entries`);
-  
-  if (newEntries.length > 0) {
-    await updateGoogleSheets(newEntries);
-  }
-  
-  await saveHistory(history);
-  console.log('Complete!');
 }
 
-main().catch(console.error);
+// Run the scraper
+main();
