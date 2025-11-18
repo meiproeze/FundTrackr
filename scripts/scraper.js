@@ -25,8 +25,8 @@ const SOURCE_PRIORITY = {
 let genAI, geminiModel;
 if (process.env.GEMINI_API_KEY) {
   genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  // FIXED: Use gemini-1.5-flash instead of deprecated gemini-pro
-  geminiModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  // FIXED: Use gemini-1.5-flash-latest (correct model name)
+  geminiModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash-latest' });
 }
 
 // Multi-API Extraction with Fallback
@@ -51,14 +51,14 @@ Extract:
 Return ONLY valid JSON, no other text.
 `;
 
-  // Try Bytez API first - COMPLETELY FIXED
+  // Try Bytez API first - FINAL FIX
   if (process.env.BYTEZ_API_KEY) {
     try {
       console.log('Trying Bytez API...');
       
-      // FIXED: Bytez uses LiteLLM-compatible endpoint
-      const response = await axios.post('https://api.bytez.com/v1/chat/completions', {
-        model: 'bytez/meta-llama/Llama-3.2-3B-Instruct', // FREE model
+      // FIXED: Bytez correct endpoint from docs
+      const response = await axios.post('https://api.bytez.com/models/v2/openai/v1/chat/completions', {
+        model: 'Qwen/Qwen2.5-3B-Instruct', // FREE fast model
         messages: [
           {
             role: 'user',
@@ -69,7 +69,7 @@ Return ONLY valid JSON, no other text.
         max_tokens: 500
       }, {
         headers: {
-          'Authorization': `Bearer ${process.env.BYTEZ_API_KEY}`,
+          'Authorization': process.env.BYTEZ_API_KEY, // No "Bearer" prefix
           'Content-Type': 'application/json'
         },
         timeout: 30000
@@ -88,12 +88,12 @@ Return ONLY valid JSON, no other text.
     }
   }
 
-  // Try OpenRouter API - FIXED MODEL NAME
+  // Try OpenRouter API with better free model
   if (process.env.OPENROUTER_API_KEY) {
     try {
       console.log('Trying OpenRouter API...');
       const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-        model: 'meta-llama/llama-3.2-3b-instruct:free', // FIXED: Correct free model
+        model: 'qwen/qwen-2.5-7b-instruct:free', // Alternative free model (more stable)
         messages: [{ role: 'user', content: prompt }]
       }, {
         headers: {
